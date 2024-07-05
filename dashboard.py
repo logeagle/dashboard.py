@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 import dash
+import subprocess
 from dash import dcc, html
 from dash.dependencies import Input, Output
 
@@ -16,9 +17,12 @@ def read_parquet_file(file_path):
 # Initialize the Dash app
 app = dash.Dash(__name__)
 
+#Checking for usename so the file can get dynamic fetching
+username = subprocess.check_output(['whoami']).decode().strip()
+
 # Paths to the Parquet files
-access_file_path = 'logeagle/access.parquet'
-error_file_path = 'logeagle/error.parquet'
+access_file_path = '/home/{username}/logeagle/access.parquet'
+error_file_path = '/home/{username}/logeagle/error.parquet'
 
 # Read the Parquet files using the function
 access_df = read_parquet_file(access_file_path)
