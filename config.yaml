@@ -1,0 +1,5 @@
+access_log_path: "/home/username/logeagle/access.parquet"
+error_log_path: "/home/username/logeagle/error.parquet"
+cache_dir: "cache-directory"
+cache_timeout: 300
+port: 8050
