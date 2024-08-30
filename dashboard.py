@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import os
 import pandas as pd
 import dash
@@ -10,29 +12,45 @@ import plotly.graph_objs as go
 from dataclasses import dataclass
 from typing import Dict, Any
 import glob
+import socket
+import traceback
 
 # Configuration
 @dataclass
 class Config:
     username: str = os.getenv('USER', 'default_user')
-    access_log_dir: str = f"/home/{username}/logeagle"
-    error_log_dir: str = f"/home/{username}/logeagle"
-    cache_dir: str = "cache-directory"
+    log_dir: str = os.path.expanduser("~/logeagle")
+    cache_dir: str = os.path.join(os.path.expanduser("~/logeagle"), "cache")
     cache_timeout: int = 10  # Reduced to 10 seconds for more frequent updates
     port: int = 8050
 
 config = Config()
+
+# Ensure the log and cache directories exist
+os.makedirs(config.log_dir, exist_ok=True)
+os.makedirs(config.cache_dir, exist_ok=True)
 
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("dashboard.log"),
+        logging.FileHandler(os.path.join(config.log_dir, "dashboard.log")),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
+
+def find_free_port(start_port: int = 8050, max_port: int = 9000) -> int:
+    """Find a free port to use for the server."""
+    for port in range(start_port, max_port):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(('', port))
+                return port
+            except OSError:
+                continue
+    raise RuntimeError(f"Could not find a free port between {start_port} and {max_port}")
 
 def read_latest_parquet_files(directory: str, prefix: str) -> pd.DataFrame:
     """Read and return the latest Parquet files as a DataFrame."""
@@ -44,12 +62,25 @@ def read_latest_parquet_files(directory: str, prefix: str) -> pd.DataFrame:
 
         dfs = []
         for file in sorted(files, reverse=True)[:5]:  # Read last 5 files
-            df = pd.read_parquet(file)
-            dfs.append(df)
+            try:
+                logger.info(f"Attempting to read file: {file}")
+                df = pd.read_parquet(file)
+                dfs.append(df)
+                logger.info(f"Successfully read file: {file}")
+            except Exception as e:
+                logger.error(f"Error reading file {file}: {str(e)}")
+                logger.error(traceback.format_exc())
 
-        return pd.concat(dfs, ignore_index=True)
+        if not dfs:
+            logger.warning(f"No valid Parquet files found for {prefix}")
+            return pd.DataFrame()
+
+        result = pd.concat(dfs, ignore_index=True)
+        logger.info(f"Combined DataFrame shape: {result.shape}")
+        return result
     except Exception as e:
         logger.error(f"Error reading Parquet files: {str(e)}")
+        logger.error(traceback.format_exc())
         return pd.DataFrame()
 
 # Initialize the Dash app
@@ -65,12 +96,7 @@ cache = Cache(app.server, config={
 @cache.memoize(timeout=config.cache_timeout)
 def get_dataframe(log_type: str) -> pd.DataFrame:
     """Cached function to read Parquet files."""
-    if log_type == 'access':
-        return read_latest_parquet_files(config.access_log_dir, "access")
-    elif log_type == 'error':
-        return read_latest_parquet_files(config.error_log_dir, "error")
-    else:
-        return pd.DataFrame()
+    return read_latest_parquet_files(config.log_dir, log_type)
 
 # Define the layout of the dashboard
 app.layout = html.Div([
@@ -94,6 +120,7 @@ app.layout = html.Div([
 )
 def render_content(tab: str, n: int) -> html.Div:
     """Callback to update the content based on the selected tab."""
+    logger.info(f"Rendering content for tab: {tab}")
     if tab == 'tab-1':
         df = get_dataframe('access')
         title = 'Access Logs'
@@ -101,12 +128,15 @@ def render_content(tab: str, n: int) -> html.Div:
         df = get_dataframe('error')
         title = 'Error Logs'
     else:
+        logger.warning(f"Invalid tab selected: {tab}")
         return html.Div("Invalid tab selected")
 
     if df.empty:
-        return html.Div(f"No data available for {title}")
+        logger.warning(f"No data available for {title}")
+        return html.Div(f"No data available for {title}. Please check if the log processor is running and generating log files.")
 
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    logger.info(f"DataFrame shape for {title}: {df.shape}")
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
     df = df.set_index('timestamp').sort_index()
     df_resampled = df.resample('1min').count()  # Resample to 1-minute intervals
 
@@ -127,11 +157,13 @@ def render_content(tab: str, n: int) -> html.Div:
 
 def main(debug: bool = False):
     """Main function to run the application."""
+    port = find_free_port(config.port)
     if debug:
-        app.run_server(debug=True, port=config.port)
+        app.run_server(debug=True, port=port)
     else:
-        logger.info(f"Starting server on port {config.port}")
-        serve(server, host='0.0.0.0', port=config.port)
+        logger.info(f"Starting server on port {port}")
+        logger.info(f"Reading log files from: {config.log_dir}")
+        serve(app.server, host='0.0.0.0', port=port)
 
 if __name__ == '__main__':
     import argparse

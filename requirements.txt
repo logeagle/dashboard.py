@@ -1,7 +1,6 @@
-# Real-time Dashboard requirements
 pandas
-pyarrow
 dash
-plotly
-Flask-Caching
+flask-caching
 waitress
+plotly
+pyarrow
