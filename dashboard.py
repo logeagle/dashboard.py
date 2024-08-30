@@ -32,7 +32,7 @@ os.makedirs(config.cache_dir, exist_ok=True)
 
 # Set up logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # Changed to DEBUG for more detailed logging
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler(os.path.join(config.log_dir, "dashboard.log")),
@@ -64,12 +64,14 @@ def read_latest_parquet_files(directory: str, prefix: str) -> pd.DataFrame:
         for file in sorted(files, reverse=True)[:5]:  # Read last 5 files
             try:
                 logger.info(f"Attempting to read file: {file}")
+                logger.debug(f"File size: {os.path.getsize(file)} bytes")
                 df = pd.read_parquet(file)
                 dfs.append(df)
                 logger.info(f"Successfully read file: {file}")
             except Exception as e:
                 logger.error(f"Error reading file {file}: {str(e)}")
                 logger.error(traceback.format_exc())
+                continue  # Skip this file and try the next one
 
         if not dfs:
             logger.warning(f"No valid Parquet files found for {prefix}")
