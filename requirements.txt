@@ -1,6 +1,7 @@
-dash==2.9.3
-pandas==1.5.3
-plotly==5.14.1
-Flask-Caching==2.0.2
-waitress==2.1.2
-pyarrow==11.0.0
+# Real-time Dashboard requirements
+pandas
+pyarrow
+dash
+plotly
+Flask-Caching
+waitress
