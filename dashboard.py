@@ -5,44 +5,25 @@ import pandas as pd
 import dash
 from dash import dcc, html
 from dash.dependencies import Input, Output
-import logging
 from flask_caching import Cache
-from waitress import serve
 import plotly.graph_objs as go
-from dataclasses import dataclass
-from typing import Dict, Any
 import glob
 import socket
-import traceback
+from datetime import datetime, timedelta
 
-# Configuration
-@dataclass
 class Config:
-    username: str = os.getenv('USER', 'default_user')
-    log_dir: str = os.path.expanduser("~/logeagle")
-    cache_dir: str = os.path.join(os.path.expanduser("~/logeagle"), "cache")
-    cache_timeout: int = 10  # Reduced to 10 seconds for more frequent updates
-    port: int = 8050
+    def __init__(self):
+        self.log_dir = os.path.expanduser("~/logeagle")
+        self.cache_dir = os.path.join(self.log_dir, "cache")
+        self.refresh_interval = 10  # seconds
+        self.port = 8050
+        
+        # Create necessary directories
+        os.makedirs(self.log_dir, exist_ok=True)
+        os.makedirs(self.cache_dir, exist_ok=True)
 
-config = Config()
-
-# Ensure the log and cache directories exist
-os.makedirs(config.log_dir, exist_ok=True)
-os.makedirs(config.cache_dir, exist_ok=True)
-
-# Set up logging
-logging.basicConfig(
-    level=logging.DEBUG,  # Changed to DEBUG for more detailed logging
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(os.path.join(config.log_dir, "dashboard.log")),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-
-def find_free_port(start_port: int = 8050, max_port: int = 9000) -> int:
-    """Find a free port to use for the server."""
+def find_free_port(start_port=8050, max_port=9000):
+    """Find an available port to run the server."""
     for port in range(start_port, max_port):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
@@ -50,69 +31,73 @@ def find_free_port(start_port: int = 8050, max_port: int = 9000) -> int:
                 return port
             except OSError:
                 continue
-    raise RuntimeError(f"Could not find a free port between {start_port} and {max_port}")
+    return start_port
 
-def read_latest_parquet_files(directory: str, prefix: str) -> pd.DataFrame:
-    """Read and return the latest Parquet files as a DataFrame."""
+def read_latest_parquet_files(directory, prefix):
+    """Read the most recent parquet files for the given prefix."""
     try:
         files = glob.glob(os.path.join(directory, f"{prefix}*.parquet"))
         if not files:
-            logger.warning(f"No {prefix} files found in {directory}")
             return pd.DataFrame()
 
+        # Read last 5 files
         dfs = []
-        for file in sorted(files, reverse=True)[:5]:  # Read last 5 files
+        for file in sorted(files, reverse=True)[:5]:
             try:
-                logger.info(f"Attempting to read file: {file}")
-                logger.debug(f"File size: {os.path.getsize(file)} bytes")
                 df = pd.read_parquet(file)
                 dfs.append(df)
-                logger.info(f"Successfully read file: {file}")
-            except Exception as e:
-                logger.error(f"Error reading file {file}: {str(e)}")
-                logger.error(traceback.format_exc())
-                continue  # Skip this file and try the next one
+            except Exception:
+                continue
 
         if not dfs:
-            logger.warning(f"No valid Parquet files found for {prefix}")
             return pd.DataFrame()
 
-        result = pd.concat(dfs, ignore_index=True)
-        logger.info(f"Combined DataFrame shape: {result.shape}")
-        return result
-    except Exception as e:
-        logger.error(f"Error reading Parquet files: {str(e)}")
-        logger.error(traceback.format_exc())
+        return pd.concat(dfs, ignore_index=True)
+    except Exception:
         return pd.DataFrame()
 
-# Initialize the Dash app
-app = dash.Dash(__name__, suppress_callback_exceptions=True)
-server = app.server
+# Initialize configuration
+config = Config()
 
-# Initialize caching
+# Initialize Dash app
+app = dash.Dash(__name__, 
+    suppress_callback_exceptions=True,
+    title="Log Eagle Dashboard"
+)
+
+# Initialize cache
 cache = Cache(app.server, config={
     'CACHE_TYPE': 'filesystem',
-    'CACHE_DIR': config.cache_dir
+    'CACHE_DIR': config.cache_dir,
+    'CACHE_DEFAULT_TIMEOUT': config.refresh_interval
 })
 
-@cache.memoize(timeout=config.cache_timeout)
-def get_dataframe(log_type: str) -> pd.DataFrame:
-    """Cached function to read Parquet files."""
+# Cache data reading
+@cache.memoize(timeout=config.refresh_interval)
+def get_dataframe(log_type):
     return read_latest_parquet_files(config.log_dir, log_type)
 
-# Define the layout of the dashboard
+# Dashboard layout with some basic styling
 app.layout = html.Div([
-    html.H1("Real-time Log Dashboard", className="dashboard-title"),
-    dcc.Tabs(id='tabs', value='tab-1', children=[
-        dcc.Tab(label='Access Logs', value='tab-1'),
-        dcc.Tab(label='Error Logs', value='tab-2'),
-    ]),
-    html.Div(id='tabs-content'),
-    dcc.Interval(
-        id='interval-component',
-        interval=10*1000,  # in milliseconds, update every 10 seconds
-        n_intervals=0
-    )
+    html.Div([
+        html.H1("Log Eagle Dashboard", 
+                style={'textAlign': 'center', 'color': '#2c3e50', 'marginBottom': 20}),
+        
+        dcc.Tabs(id='tabs', value='tab-1', children=[
+            dcc.Tab(label='Access Logs', value='tab-1',
+                   style={'padding': '10px', 'fontWeight': 'bold'}),
+            dcc.Tab(label='Error Logs', value='tab-2',
+                   style={'padding': '10px', 'fontWeight': 'bold'}),
+        ], style={'marginBottom': 20}),
+        
+        html.Div(id='tabs-content'),
+        
+        dcc.Interval(
+            id='interval-component',
+            interval=config.refresh_interval * 1000,  # Convert to milliseconds
+            n_intervals=0
+        )
+    ], style={'padding': '20px'})
 ])
 
 @app.callback(
@@ -120,57 +105,107 @@ app.layout = html.Div([
     [Input('tabs', 'value'),
      Input('interval-component', 'n_intervals')]
 )
-def render_content(tab: str, n: int) -> html.Div:
-    """Callback to update the content based on the selected tab."""
-    logger.info(f"Rendering content for tab: {tab}")
+def update_content(tab, n):
+    """Update dashboard content based on selected tab."""
+    # Determine which logs to show
     if tab == 'tab-1':
         df = get_dataframe('access')
         title = 'Access Logs'
-    elif tab == 'tab-2':
+    else:
         df = get_dataframe('error')
         title = 'Error Logs'
-    else:
-        logger.warning(f"Invalid tab selected: {tab}")
-        return html.Div("Invalid tab selected")
 
     if df.empty:
-        logger.warning(f"No data available for {title}")
-        return html.Div(f"No data available for {title}. Please check if the log processor is running and generating log files.")
+        return html.Div([
+            html.H3("No Data Available",
+                    style={'textAlign': 'center', 'color': '#e74c3c'}),
+            html.P("Please check if the log processor is running and generating log files.",
+                  style={'textAlign': 'center'})
+        ])
 
-    logger.info(f"DataFrame shape for {title}: {df.shape}")
+    # Process the data
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
     df = df.set_index('timestamp').sort_index()
-    df_resampled = df.resample('1min').count()  # Resample to 1-minute intervals
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df_resampled.index, y=df_resampled['line'], mode='lines', name='Log Entries'))
-    fig.update_layout(
-        title=f'{title} Over Time (Last 5 Files)',
-        xaxis_title='Time',
-        yaxis_title='Number of Log Entries',
-        template='plotly_white'
-    )
+    
+    # Create time series plot
+    time_series = create_time_series(df, title)
+    
+    # Create log entries table
+    log_table = create_log_table(df)
 
     return html.Div([
-        html.H3(title, className="section-title"),
-        dcc.Graph(id=f'{tab}-graph', figure=fig),
-        html.Div(f"Last updated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}", className="update-time")
+        html.Div([
+            dcc.Graph(figure=time_series),
+        ], style={'marginBottom': 20}),
+        
+        html.H3("Recent Log Entries",
+                style={'color': '#2c3e50', 'marginBottom': 10}),
+        
+        log_table,
+        
+        html.Div(
+            f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            style={'textAlign': 'right', 'color': '#7f8c8d', 'marginTop': 10}
+        )
     ])
 
-def main(debug: bool = False):
-    """Main function to run the application."""
+def create_time_series(df, title):
+    """Create time series plot of log frequency."""
+    df_resampled = df.resample('1min').count()
+    
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df_resampled.index,
+        y=df_resampled['line'],
+        mode='lines',
+        name='Log Entries',
+        line={'color': '#3498db'}
+    ))
+    
+    fig.update_layout(
+        title={
+            'text': f'{title} Frequency Over Time',
+            'x': 0.5,
+            'xanchor': 'center'
+        },
+        xaxis_title='Time',
+        yaxis_title='Number of Log Entries',
+        template='plotly_white',
+        height=400
+    )
+    
+    return fig
+
+def create_log_table(df):
+    """Create a table of recent log entries."""
+    recent_logs = df.tail(10).reset_index()
+    
+    return html.Table(
+        [html.Tr([html.Th('Timestamp'), html.Th('Log Entry')],
+                 style={'backgroundColor': '#2c3e50', 'color': 'white'})] +
+        [html.Tr([
+            html.Td(row['timestamp'].strftime('%Y-%m-%d %H:%M:%S')),
+            html.Td(row['line'])
+        ]) for _, row in recent_logs.iterrows()],
+        style={
+            'width': '100%',
+            'border': '1px solid #bdc3c7',
+            'borderCollapse': 'collapse'
+        }
+    )
+
+def main():
     port = find_free_port(config.port)
-    if debug:
-        app.run_server(debug=True, port=port)
-    else:
-        logger.info(f"Starting server on port {port}")
-        logger.info(f"Reading log files from: {config.log_dir}")
-        serve(app.server, host='0.0.0.0', port=port)
+    print(f"\nStarting Log Eagle Dashboard:")
+    print(f"* Dashboard URL: http://localhost:{port}")
+    print(f"* Reading logs from: {config.log_dir}")
+    print(f"* Refresh interval: {config.refresh_interval} seconds\n")
+    
+    app.run_server(
+        host='0.0.0.0',
+        port=port,
+        debug=False
+    )
 
 if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser(description='Run the Real-time Log Dashboard app.')
-    parser.add_argument('--debug', action='store_true', help='Run in debug mode')
-    args = parser.parse_args()
-
-    main(debug=args.debug)
+    main()
